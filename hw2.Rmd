@@ -19,22 +19,303 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r, echo = T, message = FALSE, results='hide', warning=FALSE}
+library(caret)
+library(tidymodels)
+library(splines)
+library(mgcv)
+library(pdp)
+library(earth)
+library(ggplot2)
 ```
 
-## Including Plots
+First, we need to set a seed for reproducibility. Then we will import the data and conduct a training/testing split, using 80% for training and 20% for testing.
 
-You can also embed plots, for example:
+```{r import}
+set.seed(81062)
+college <- read.csv("College.csv")
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+# college <- college |> na.omit()
+
+data_split <- initial_split(college, prop = 0.8)
+training <- training(data_split)
+testing <- testing(data_split)
+
+training_y <- training$Outstate
+training_x <- model.matrix(Outstate ~ ., training)[,-1]
+
+testing_y <- testing$Outstate
+testing_x <- model.matrix(Outstate ~ ., testing)[,-1]
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+Except for the dummy variables created for each college, the other predictors are continuous. We can examine their relationships with our outcome variable, `Outstate` - out of state tuition.
+
+```{r correlations}
+theme1 <- trellis.par.get()
+theme1$plot.symbol$col <- rgb(.2, .4, .2, .5)
+theme1$plot.symbol$pch <- 16
+theme1$plot.line$col <- rgb(.8, .1, .1, 1)
+theme1$plot.line$lwd <- 2
+theme1$strip.background$col <- rgb(.0, .2, .6, .2)
+trellis.par.set(theme1)
+
+featurePlot(training_x[, -c(1:451)], training_y, plot = "scatter", labels = c("", "Y"),
+            type = c("p"), layout = c(3, 2))
+```
+
+Potential variables with nonlinear relationships with `Outstate` include `Apps`, `Accept`, `Enroll`, `F.Undergrad`, `Expend`, `S.F.Ratio`, `PhD`, and `Terminal` (both of which appear to have some exponential aspect).
+
+# Fitting smoothing spline 
+
+The range of degrees of freedom is from 1 to the number of unique predictor values, which is `r length(unique(training_x[, "perc.alumni"]))`. Therefore, a range of degrees of freedom is tested, ranging from 10 to 50 by an increment of 10.
+
+```{r a range of df}
+
+ss.10 <- 
+  smooth.spline(
+    training_x[, "perc.alumni"],
+    training_y,
+    df = 10
+  )
+
+ss.20 <-
+  smooth.spline(
+    training_x[, "perc.alumni"],
+    training_y,
+    df = 20
+  )
+
+ss.30 <-
+  smooth.spline(
+    training_x[, "perc.alumni"],
+    training_y,
+    df = 30
+  )
+
+ss.40 <-
+  smooth.spline(
+    training_x[, "perc.alumni"],
+    training_y,
+    df = 40
+  )
+
+ss.50 <-
+  smooth.spline(
+    training_x[, "perc.alumni"],
+    training_y,
+    df = 50
+  )
+
+pred.ss.10 <- 
+  predict(
+    ss.10,
+    x = testing_x[, "perc.alumni"],
+  )  
+
+pred.ss.20 <- 
+  predict(
+    ss.20,
+    x = testing_x[, "perc.alumni"]
+  ) 
+
+pred.ss.30 <- 
+  predict(
+    ss.30,
+    x = testing_x[, "perc.alumni"]
+  )
+
+pred.ss.40 <- 
+  predict(
+    ss.40,
+    x = testing_x[, "perc.alumni"]
+  ) 
+
+pred.ss.50 <- 
+  predict(
+    ss.50,
+    x = testing_x[, "perc.alumni"]
+  ) 
+
+combined <- 
+  cbind(
+    x = testing_x[, "perc.alumni"],
+    df10 = as.data.frame(pred.ss.10)[, "y"],
+    df20 = as.data.frame(pred.ss.20)[, "y"],
+    df30 = as.data.frame(pred.ss.30)[, "y"],
+    df40 = as.data.frame(pred.ss.40)[, "y"],
+    df50 = as.data.frame(pred.ss.50)[, "y"]
+  ) |> 
+  as.data.frame() |> 
+  pivot_longer(
+    !x,
+    names_to = "df",
+    values_to = "pred"
+  )
+
+
+ggplot(aes(x = perc.alumni, y = Outstate), data = testing) +
+  geom_point() +
+  geom_line(aes(x = x, y = pred, col = df), linewidth = 0.75, data = combined) +
+  theme_bw()
+
+
+```
+
+As visualized above, when fitting the predicted values for a given degree of freedom to the training dataset, as the degrees of freedom increases, the roughness of the fitted curve increases. With degrees of freedom = 10, the curve is at its smoothest, but with degrees of freedom = 50, the curve is most jagged. 
+
+```{r a optimal df}
+ss <- 
+  smooth.spline(
+    training_x[, "perc.alumni"],
+    training_y
+  )
+
+pred.ss <-
+  predict(
+    ss,
+    x = testing_x[, "perc.alumni"]
+  )
+
+pred.ss |> 
+  as.data.frame() |> 
+  ggplot(aes(x = x, y = y)) + 
+  geom_line(linewidth = 1, color = "lightpink3")  +
+  geom_point(aes(x = testing_x[, "perc.alumni"], y = testing_y)) +
+  labs(y = "Outstate", x = "perc.alumni") + 
+  theme_bw()
+
+ss$df
+```
+
+When not passing a prespecified degree of freedom to `smooth.spline`, it automatically uses generalized cross validation to get the optimal degree of freedom, `r print(ss$df)`, which is used to get the optimal fit for smoothing spline. This is plotted above.
+
+# Fitting multivariate adaptive regression spline 
+
+To get the optimal number of terms and degree of interactions, ensure that the plotted RMSE has approximately a U shaped curve and the lowest RMSE is plotted. 
+
+```{r b mars}
+set.seed(81062)
+
+ctrl1 <- trainControl(method = "cv", number = 10)
+
+mars_grid <- expand.grid(degree = 1:3, 
+                         nprune = 2:25)
+
+mars <- 
+  train(
+    training_x, training_y,
+    method = "earth",
+    tuneGrid = mars_grid,
+    trControl = ctrl1
+  )
+
+ggplot(mars)
+
+mars$bestTune
+
+coef(mars$finalModel) 
+```
+Arbitrary predictors in the model of `Room.Board` and `Grad.Rate` were selected to include in the partial dependence plot. 
+
+```{r b partial}
+partial1 <- 
+  pdp::partial(
+    mars, pred.var = c("perc.alumni"), 
+    grid.resolution = 10
+  ) |> 
+  autoplot()
+
+partial2 <- 
+  pdp::partial(
+    mars, pred.var = c("Room.Board", "Grad.Rate"), 
+    grid.resolution = 10
+  ) |>
+  pdp::plotPartial(
+    levelplot = FALSE, 
+    zlab = "yhat", 
+    drape = TRUE, 
+    screen = list(z = 20, x = -60)
+  )
+
+gridExtra::grid.arrange(partial1, partial2, ncol = 2)
+```
+Over the 10-fold cross validation, the mean CV RMSE across each fold is `r mean(mars$resample$RMSE)`.
+
+```{r b test rmse}
+mars_pred <- predict(mars, newdata = testing)
+
+mars_pred_error <- mean((mars_pred - testing_y)^2)
+```
+
+When fit to the testing dataset, the MARS model has a test MSE of `r mars_pred_error`.
+
+# Fitting generalized additive model (GAM)
+
+```{r c} 
+set.seed(81062)
+
+gam <- gam(Outstate ~ s(perc.alumni) + s(Terminal) + s(Books) + s(PhD) + 
+    s(Grad.Rate) + s(Top10perc) + s(Top25perc) + s(S.F.Ratio) + 
+    s(Personal) + s(P.Undergrad) + s(Room.Board) + s(Enroll) + 
+    s(Accept) + s(F.Undergrad) + s(Apps) + s(Expend), 
+    data = training)
+
+plot(gam)
+
+gam_2 <- train(
+    training_x, training_y,
+    method = "gam",
+    trControl = ctrl1
+  )
+
+gam_2$bestTune
+
+gam_2$finalModel
+  
+```
+
+
+```{r c test error}
+
+gam_pred <- predict(gam, newdata = testing)
+
+gam_pred_error <- mean((gam_pred - testing_y)^2)
+```
+
+When fit to the testing dataset, the GAM has a test error MSE of `r gam_pred_error`.
+
+```{r d, warning = F}
+lm <- 
+  train(
+    Outstate ~ perc.alumni + Terminal + Books + PhD + 
+    Grad.Rate + Top10perc + Top25perc + S.F.Ratio + 
+    Personal + P.Undergrad + Room.Board + Enroll + 
+    Accept + F.Undergrad + Apps + Expend,
+    data = training,
+    method = "lm",
+    trControl = ctrl1
+  )
+
+resamp <- 
+  resamples(
+    list(
+      gam = gam_2,
+      mars = mars, 
+      lm = lm
+    )
+  )
+
+mars_rmse <-mean(resamp$values$`mars~RMSE`)
+gam_rmse <- mean(resamp$values$`gam~RMSE`)
+lm_rmse <- mean(resamp$values$`lm~RMSE`)
+
+bwplot(resamp, metric = "RMSE")
+
+lm_pred <- predict(lm, newdata = testing)
+
+lm_pred_error <- mean((lm_pred - testing_y)^2)
+```
+
+For this particular dataset, I would favor MARS over a linear model to predict out of state tuition. When comparing the CV mean RMSEs, the MARS model has a mean RMSE of `r mars_rmse`, while the linear model has a mean RMSE of `r lm_rmse`. While only slightly higher, this is likely from the non-linear relations out of state tuition has with some predictors like `perc.alumni`, `P.Undergrad`, and `F.Undergrad`. Additionally, MARS is better able to account for interaction. 
+
+More broadly, it cannot be generalized whether MARS or linear models are preferred. It depends on a given dataset. If the dataset can be simply predicted with a linear relationship, without much interaction, then a linear model may be preferable, especially since it is easily interpretable and provides 95% CI. However, if there is considerable interaction and non-linear relations, then MARS may be preferred.  
