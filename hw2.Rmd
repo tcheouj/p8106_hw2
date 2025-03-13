@@ -43,12 +43,14 @@ testing <- testing(data_split)
 
 training_y <- training$Outstate
 training_x <- model.matrix(Outstate ~ ., training)[,-1]
+training_predictors <- training_x[, (ncol(training_x)-15):(ncol(training_x))]
 
 testing_y <- testing$Outstate
 testing_x <- model.matrix(Outstate ~ ., testing)[,-1]
+testing_predictors <- testing_x[, (ncol(testing_x)-15):(ncol(testing_x))]
 ```
 
-Except for the dummy variables created for each college, the other predictors are continuous. We can examine their relationships with our outcome variable, `Outstate` - out of state tuition.
+Except for the dummy variables created for each college, the other predictors are continuous. We can examine their relationships with our outcome variable, `Outstate` - out of state tuition. With the training data, only the predictors with indexes 452-467 are used and the College predictors are discarded.
 
 ```{r correlations}
 theme1 <- trellis.par.get()
@@ -59,7 +61,7 @@ theme1$plot.line$lwd <- 2
 theme1$strip.background$col <- rgb(.0, .2, .6, .2)
 trellis.par.set(theme1)
 
-featurePlot(training_x[, -c(1:451)], training_y, plot = "scatter", labels = c("", "Y"),
+featurePlot(training_predictors, training_y, plot = "scatter", labels = c("", "Y"),
             type = c("p"), layout = c(3, 2))
 ```
 
@@ -67,41 +69,41 @@ Potential variables with nonlinear relationships with `Outstate` include `Apps`,
 
 # Fitting smoothing spline 
 
-The range of degrees of freedom is from 1 to the number of unique predictor values, which is `r length(unique(training_x[, "perc.alumni"]))`. Therefore, a range of degrees of freedom is tested, ranging from 10 to 50 by an increment of 10.
+The range of degrees of freedom is from 1 to the number of unique predictor values, which is `r length(unique(training_predictors[, "perc.alumni"]))`. Therefore, a range of degrees of freedom is tested, ranging from 10 to 50 by an increment of 10.
 
 ```{r a range of df}
 
 ss.10 <- 
   smooth.spline(
-    training_x[, "perc.alumni"],
+    training_predictors[, "perc.alumni"],
     training_y,
     df = 10
   )
 
 ss.20 <-
   smooth.spline(
-    training_x[, "perc.alumni"],
+    training_predictors[, "perc.alumni"],
     training_y,
     df = 20
   )
 
 ss.30 <-
   smooth.spline(
-    training_x[, "perc.alumni"],
+    training_predictors[, "perc.alumni"],
     training_y,
     df = 30
   )
 
 ss.40 <-
   smooth.spline(
-    training_x[, "perc.alumni"],
+    training_predictors[, "perc.alumni"],
     training_y,
     df = 40
   )
 
 ss.50 <-
   smooth.spline(
-    training_x[, "perc.alumni"],
+    training_predictors[, "perc.alumni"],
     training_y,
     df = 50
   )
@@ -152,21 +154,18 @@ combined <-
     values_to = "pred"
   )
 
-
 ggplot(aes(x = perc.alumni, y = Outstate), data = testing) +
   geom_point() +
   geom_line(aes(x = x, y = pred, col = df), linewidth = 0.75, data = combined) +
   theme_bw()
-
-
 ```
 
-As visualized above, when fitting the predicted values for a given degree of freedom to the training dataset, as the degrees of freedom increases, the roughness of the fitted curve increases. With degrees of freedom = 10, the curve is at its smoothest, but with degrees of freedom = 50, the curve is most jagged. 
+As visualized above, when fitting the predicted values for a given degree of freedom to the testing dataset, as the degrees of freedom increases, the roughness of the fitted curve increases. With degrees of freedom = 10, the curve is at its smoothest, but with degrees of freedom = 50, the curve is most jagged. Plots for degrees of freedom > 10 look to be overfitting the data and are too jagged to capture the approximately linear relation, so the optimal degree of freedom is likely between 1 and 10. 
 
 ```{r a optimal df}
 ss <- 
   smooth.spline(
-    training_x[, "perc.alumni"],
+    training_predictors[, "perc.alumni"],
     training_y
   )
 
@@ -175,6 +174,28 @@ pred.ss <-
     ss,
     x = testing_x[, "perc.alumni"]
   )
+
+combined_optimal <- 
+  cbind(
+    x = testing_x[, "perc.alumni"],
+    df2 = as.data.frame(pred.ss)[, "y"], 
+    df10 = as.data.frame(pred.ss.10)[, "y"],
+    df20 = as.data.frame(pred.ss.20)[, "y"],
+    df30 = as.data.frame(pred.ss.30)[, "y"],
+    df40 = as.data.frame(pred.ss.40)[, "y"],
+    df50 = as.data.frame(pred.ss.50)[, "y"]
+  ) |> 
+  as.data.frame() |> 
+  pivot_longer(
+    !x,
+    names_to = "df",
+    values_to = "pred"
+  )
+
+ggplot(aes(x = perc.alumni, y = Outstate), data = testing) +
+  geom_point() +
+  geom_line(aes(x = x, y = pred, col = df), linewidth = 0.75, data = combined_optimal) +
+  theme_bw()
 
 pred.ss |> 
   as.data.frame() |> 
@@ -185,13 +206,17 @@ pred.ss |>
   theme_bw()
 
 ss$df
+
+ggplot(aes(x = perc.alumni, y = Outstate), data = testing) +
+  geom_point() + 
+  geom_line(aes(x = testing_x[, "perc.alumni"], y = as.data.frame(pred.ss)[, "y"]), linewidth = 1, color = "lightpink3") 
 ```
 
-When not passing a prespecified degree of freedom to `smooth.spline`, it automatically uses generalized cross validation to get the optimal degree of freedom, `r print(ss$df)`, which is used to get the optimal fit for smoothing spline. This is plotted above.
+When not passing a prespecified degree of freedom to `smooth.spline`, it automatically uses generalized cross validation to get the optimal degree of freedom, `r print(ss$df)`, which is used to get the optimal fit for smoothing spline. This is plotted above with the testing dataset to compare with the prior range of degrees of freedom. 
 
 # Fitting multivariate adaptive regression spline 
 
-To get the optimal number of terms and degree of interactions, ensure that the plotted RMSE has approximately a U shaped curve and the lowest RMSE is plotted. 
+To get the optimal number of terms and degree of interactions, ensure that the plotted RMSE has approximately a U shaped curve and the lowest RMSE is plotted. A range of number of terms is from 2:16, the total number of predictors. 
 
 ```{r b mars}
 set.seed(81062)
@@ -199,11 +224,11 @@ set.seed(81062)
 ctrl1 <- trainControl(method = "cv", number = 10)
 
 mars_grid <- expand.grid(degree = 1:3, 
-                         nprune = 2:25)
+                         nprune = 2:16)
 
 mars <- 
   train(
-    training_x, training_y,
+    training_predictors, training_y,
     method = "earth",
     tuneGrid = mars_grid,
     trControl = ctrl1
@@ -215,6 +240,9 @@ mars$bestTune
 
 coef(mars$finalModel) 
 ```
+
+The ideal MARS model has a degree of features of `r mars$bestTune$degree` and a number of terms of `r mars$bestTune$nprune`.
+
 Arbitrary predictors in the model of `Room.Board` and `Grad.Rate` were selected to include in the partial dependence plot. 
 
 ```{r b partial}
@@ -239,6 +267,7 @@ partial2 <-
 
 gridExtra::grid.arrange(partial1, partial2, ncol = 2)
 ```
+
 Over the 10-fold cross validation, the mean CV RMSE across each fold is `r mean(mars$resample$RMSE)`.
 
 ```{r b test rmse}
@@ -263,13 +292,13 @@ gam <- gam(Outstate ~ s(perc.alumni) + s(Terminal) + s(Books) + s(PhD) +
 plot(gam)
 
 gam_2 <- train(
-    training_x, training_y,
+    training_predictors, training_y,
     method = "gam",
     trControl = ctrl1
   )
 
 gam_2$bestTune
-
+ 
 gam_2$finalModel
   
 ```
@@ -282,7 +311,7 @@ gam_pred <- predict(gam, newdata = testing)
 gam_pred_error <- mean((gam_pred - testing_y)^2)
 ```
 
-When fit to the testing dataset, the GAM has a test error MSE of `r gam_pred_error`.
+When fit to the testing dataset, the GAM has a test MSE of `r gam_pred_error`.
 
 ```{r d, warning = F}
 lm <- 
